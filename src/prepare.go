@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kshedden/gonpy"
+	"gonpy"
 )
 
 // read kv to map

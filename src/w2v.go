@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kshedden/gonpy"
+	"gonpy"
 )
 
 type w2v struct {
@@ -72,13 +72,7 @@ func train(model w2v, conf params, trainData [][]int, probArr []int, pid int, wg
 	defer wg.Done()
 	threadRnd := rand.New(rand.NewSource(time.Now().Unix()))
 	for iterCu := 0; iterCu < conf.Iters; iterCu++ {
-		pLoss := 0.0
-		nLoss := 0.0
-		reg := 0.0
-		lossCu := 0.0
-		regCu := 0.0
-		posSamples := 0.0
-		negSamples := 0.0
+		pLoss, nLoss, reg, lossCu, regCu, posSamples, negSamples := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 		start := time.Now()
 		for _, words := range trainData {
 			// 根据Session长度过滤语料
@@ -91,25 +85,17 @@ func train(model w2v, conf params, trainData [][]int, probArr []int, pid int, wg
 						continue
 					}
 					// positive
-					if conf.EmbeddingReused == 0 {
-						lossCu, regCu = trainSample(model, conf, x, words[j], 1.0)
-					} else {
-						lossCu, regCu = trainSampleReuseEmbedding(model, conf, x, words[j], 1.0)
-					}
+					lossCu, regCu = trainSample(model, conf, x, words[j], 1.0, conf.EmbeddingReused)
 					pLoss += lossCu
-					reg += regCu
-					posSamples += 1.0
+                    reg += regCu
+                    posSamples += 1.0
 					// negative
 					for negCu := 0; negCu < conf.Negatives; negCu++ {
 						yNeg := probArr[threadRnd.Intn(len(probArr))]
-						if conf.EmbeddingReused == 0 {
-							lossCu, regCu = trainSample(model, conf, x, yNeg, 0.0)
-						} else {
-							lossCu, regCu = trainSampleReuseEmbedding(model, conf, x, yNeg, 0.0)
-						}
+						lossCu, regCu = trainSample(model, conf, x, yNeg, 0.0, conf.EmbeddingReused)
 						nLoss += lossCu
-						reg += regCu
-						negSamples += 1.0
+                        reg += regCu
+                        negSamples += 1.0
 					}
 				}
 			}
@@ -124,89 +110,49 @@ func train(model w2v, conf params, trainData [][]int, probArr []int, pid int, wg
 	}
 }
 
-func trainSample(model w2v, conf params, x int, y int, l float64) (float64, float64) {
-	s := 0.0
-	for i, v := range model.embeddings[x] {
-		s += model.weights[y][i] * v
-	}
-	s = 1.0 / (1.0 + math.Exp(-s))
-	// for prevent loss from NaN
-	if s < 1e-8 {
-		s = 1e-8
-	} else if s > 1-1e-8 {
-		s = 1 - 1e-8
-	}
-	e := s - l
-	// update
-	for i, v := range model.embeddings[x] {
-		model.embeddings[x][i] -= conf.Lr * (e*model.weights[y][i] + conf.RegRate*v)
-		// 正则
-		// if model.embeddings[x][i] > conf.MaxVal {
-		// 	model.embeddings[x][i] = conf.MaxVal
-		// } else if model.embeddings[x][i] < -conf.MaxVal {
-		// 	model.embeddings[x][i] = -conf.MaxVal
-		// }
-	}
-	for i, v := range model.weights[x] {
-		model.weights[y][i] -= conf.Lr * (e*model.embeddings[x][i] + conf.RegRate*v)
-		// 正则
-		// if model.weights[y][i] > conf.MaxVal {
-		// 	model.weights[y][i] = conf.MaxVal
-		// } else if model.weights[y][i] < -conf.MaxVal {
-		// 	model.weights[y][i] = -conf.MaxVal
-		// }
-	}
-	// loss & reg
-	loss := -(l*math.Log(s) + (1.0-l)*math.Log(1.0-s))
-	reg := 0.0
-	for i, v := range model.embeddings[x] {
-		reg += v * v
-		reg += model.weights[y][i] * model.weights[y][i]
-	}
-	reg = math.Sqrt(reg/2) / float64(conf.EmbeddingSz)
-	return loss, reg
-}
+func trainSample(model w2v, conf params, x int, y int, l float64, reuse int) (float64, float64) {
+	/*
+	   trainSample: train a single sample
+	   x: iid
+	   y: iid
+	   l: label
+	   reuse: x, y in sample space
 
-// reuse embedding
-func trainSampleReuseEmbedding(model w2v, conf params, x int, y int, l float64) (float64, float64) {
+	   return: mf loss, l2 loss
+	*/
 	s := 0.0
 	for i, v := range model.embeddings[x] {
-		s += model.embeddings[y][i] * v
+		if reuse == 1 {
+			s += model.embeddings[y][i] * v
+		} else {
+			s += model.weights[y][i] * v
+		}
 	}
+	// probability
 	s = 1.0 / (1.0 + math.Exp(-s))
-	// for prevent loss from NaN
-	if s < 1e-8 {
-		s = 1e-8
-	} else if s > 1-1e-8 {
-		s = 1 - 1e-8
+	if reuse == 1 {
+		for i, v := range model.embeddings[x] {
+			model.embeddings[x][i] -= conf.Lr * ((s-l)*model.embeddings[y][i] + conf.RegRate*v)
+		}
+		for i, v := range model.embeddings[y] {
+			model.embeddings[y][i] -= conf.Lr * ((s-l)*model.embeddings[x][i] + conf.RegRate*v)
+		}
+	} else {
+		for i, v := range model.embeddings[x] {
+			model.embeddings[x][i] -= conf.Lr * ((s-l)*model.weights[y][i] + conf.RegRate*v)
+		}
+		for i, v := range model.weights[y] {
+			model.weights[y][i] -= conf.Lr * ((s-l)*model.embeddings[x][i] + conf.RegRate*v)
+		}
 	}
-	e := s - l
-	// update
-	for i, v := range model.embeddings[x] {
-		model.embeddings[x][i] -= conf.Lr * (e*model.embeddings[y][i] + conf.RegRate*v)
-		// if model.embeddings[x][i] > conf.MaxVal {
-		// 	model.embeddings[x][i] = conf.MaxVal
-		// } else if model.embeddings[x][i] < -conf.MaxVal {
-		// 	model.embeddings[x][i] = -conf.MaxVal
-		// }
-	}
-	for i, v := range model.embeddings[x] {
-		model.embeddings[y][i] -= conf.Lr * (e*model.embeddings[x][i] + conf.RegRate*v)
-		// if model.embeddings[y][i] > conf.MaxVal {
-		// 	model.embeddings[y][i] = conf.MaxVal
-		// } else if model.embeddings[y][i] < -conf.MaxVal {
-		// 	model.embeddings[y][i] = -conf.MaxVal
-		// }
-	}
-	// loss & reg
+	// cal log loss & l2 loss
 	loss := -(l*math.Log(s) + (1.0-l)*math.Log(1.0-s))
-	reg := 0.0
-	for i, v := range model.embeddings[x] {
-		reg += v * v
-		reg += model.embeddings[y][i] * model.embeddings[y][i]
+	l2 := 0.0
+	for _, v := range model.embeddings[x] {
+		l2 += v * v
 	}
-	reg = math.Sqrt(reg/2) / float64(conf.EmbeddingSz)
-	return loss, reg
+	l2 = math.Sqrt(l2) / float64(conf.EmbeddingSz)
+	return loss, l2
 }
 
 func l2Norm(vec []float64) []float64 {
@@ -226,9 +172,11 @@ func l2Norm(vec []float64) []float64 {
 }
 
 func save(model w2v, conf params) {
+	// new a writer
 	wtr, _ := gonpy.NewFileWriter(conf.EmbeddingPath)
 	wtr.Shape = []int{len(model.embeddings), conf.EmbeddingSz}
 	wtr.Version = 2
+	// new a 1d array
 	embedding := make([]float64, 0)
 	log.Println("normalize the embedding with l2 ...")
 	for _, line := range model.embeddings {
